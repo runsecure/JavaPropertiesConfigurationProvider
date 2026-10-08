@@ -82,17 +82,17 @@ public ref struct JavaPropertiesWriter
             WriteByte((byte)' ');
         }
 
-        foreach (char c in comment)
+        int runStart = 0;
+        for (int i = 0; i < comment.Length; i++)
         {
-            if (c is '\r' or '\n')
+            if (comment[i] is '\r' or '\n')
             {
+                FlushRun(comment, ref runStart, i);
                 WriteByte((byte)' ');
-            }
-            else
-            {
-                WriteUtf8Char(c);
+                runStart = i + 1;
             }
         }
+        FlushRun(comment, ref runStart, comment.Length);
 
         WriteBytes(_newLineBytes);
     }
@@ -178,12 +178,6 @@ public ref struct JavaPropertiesWriter
         dest[3] = (byte)hexDigits[value & 0xF];
     }
 
-    private void WriteUtf8Char(char c)
-    {
-        Span<char> chars = stackalloc char[1] { c };
-        WriteUtf8(chars);
-    }
-
     private void WriteUtf8(scoped ReadOnlySpan<char> chars)
     {
         const int MaxCharsPerChunk = 64;
@@ -192,6 +186,11 @@ public ref struct JavaPropertiesWriter
         while (!chars.IsEmpty)
         {
             int take = Math.Min(chars.Length, MaxCharsPerChunk);
+            if (take < chars.Length && char.IsHighSurrogate(chars[take - 1]))
+            {
+                // Keep the surrogate pair together so it is encoded as one code point, not two U+FFFD.
+                take--;
+            }
             ReadOnlySpan<char> slice = chars.Slice(0, take);
             int written = Encoding.UTF8.GetBytes(slice, tmp);
             WriteBytes(tmp.Slice(0, written));

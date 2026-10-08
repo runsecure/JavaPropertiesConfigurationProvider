@@ -5,15 +5,19 @@ namespace Microsoft.Extensions.Configuration.JavaProperties;
 /// <summary>
 /// Drives a <see cref="JavaPropertiesReader"/> over a <see cref="Stream"/> in bounded-size chunks,
 /// growing its working buffer only as far as required by the single longest key/value/comment in
-/// the document. This keeps peak memory usage decoupled from total file size for the common (UTF-8)
-/// case. UTF-16 input is detected via its byte-order mark and transcoded to UTF-8 up front, which
-/// requires buffering the whole document in memory.
+/// the document. Peak memory is therefore bounded by <see cref="JavaPropertiesReaderOptions.MaxTokenSize"/>
+/// rather than by total file size. UTF-16 input is detected via its byte-order mark and transcoded to
+/// UTF-8 incrementally, so it is subject to the same bound.
 /// </summary>
 internal static class JavaPropertiesStreamProcessor
 {
     public delegate void PropertyCallback(ReadOnlySpan<byte> key, ReadOnlySpan<byte> value);
 
-    public static void ProcessProperties(Stream stream, PropertyCallback callback, int initialBufferSize = 8192)
+    public static void ProcessProperties(
+        Stream stream,
+        PropertyCallback callback,
+        int initialBufferSize = 8192,
+        JavaPropertiesReaderOptions options = default)
     {
         byte[] head = new byte[3];
         int headRead = 0;
@@ -31,39 +35,30 @@ internal static class JavaPropertiesStreamProcessor
 
         if (bom is ByteOrderMark.Utf16LittleEndian or ByteOrderMark.Utf16BigEndian)
         {
-            using var ms = new MemoryStream();
-            ms.Write(head, bomLength, headRead - bomLength);
-            stream.CopyTo(ms);
-            byte[] raw = ms.ToArray();
-
             Encoding sourceEncoding = bom == ByteOrderMark.Utf16LittleEndian ? Encoding.Unicode : Encoding.BigEndianUnicode;
-            byte[] utf8 = Encoding.UTF8.GetBytes(sourceEncoding.GetString(raw));
-
-            ProcessAllAtOnce(utf8, callback);
+            var remainder = new PrefixedReadStream(head.AsMemory(bomLength, headRead - bomLength), stream);
+            using Stream utf8 = Encoding.CreateTranscodingStream(remainder, sourceEncoding, Encoding.UTF8, leaveOpen: true);
+            ProcessChunked(utf8, ReadOnlySpan<byte>.Empty, callback, initialBufferSize, options);
             return;
         }
 
         int prefixStart = bom == ByteOrderMark.Utf8 ? bomLength : 0;
-        ProcessChunked(stream, head.AsSpan(prefixStart, headRead - prefixStart), callback, initialBufferSize);
+        ProcessChunked(stream, head.AsSpan(prefixStart, headRead - prefixStart), callback, initialBufferSize, options);
     }
 
-    private static void ProcessAllAtOnce(byte[] utf8, PropertyCallback callback)
-    {
-        var reader = new JavaPropertiesReader(utf8, isFinalBlock: true);
-        while (reader.ReadProperty())
-        {
-            callback(reader.KeySpan, reader.ValueSpan);
-        }
-    }
-
-    private static void ProcessChunked(Stream stream, ReadOnlySpan<byte> prefix, PropertyCallback callback, int initialBufferSize)
+    private static void ProcessChunked(
+        Stream stream,
+        ReadOnlySpan<byte> prefix,
+        PropertyCallback callback,
+        int initialBufferSize,
+        JavaPropertiesReaderOptions options)
     {
         byte[] buffer = new byte[Math.Max(Math.Max(256, initialBufferSize), prefix.Length)];
         prefix.CopyTo(buffer);
         int filled = prefix.Length;
 
         long bufferStartOffset = 0;
-        var state = new JavaPropertiesReaderState();
+        var state = new JavaPropertiesReaderState(options);
         bool endOfStream = false;
 
         while (true)
@@ -114,8 +109,41 @@ internal static class JavaPropertiesStreamProcessor
 
             if (filled == buffer.Length)
             {
+                // The reader throws once an incomplete token exceeds MaxTokenSize, so this growth is bounded
+                // to roughly twice that limit no matter how large or hostile the input is.
                 Array.Resize(ref buffer, buffer.Length * 2);
             }
         }
+    }
+
+    /// <summary>A read-only stream that yields a small prefix (bytes already read while sniffing the BOM) and then the inner stream.</summary>
+    private sealed class PrefixedReadStream(ReadOnlyMemory<byte> prefix, Stream inner) : Stream
+    {
+        private ReadOnlyMemory<byte> _prefix = prefix;
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+
+        public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+        public override int Read(Span<byte> buffer)
+        {
+            if (!_prefix.IsEmpty)
+            {
+                int n = Math.Min(buffer.Length, _prefix.Length);
+                _prefix.Span.Slice(0, n).CopyTo(buffer);
+                _prefix = _prefix.Slice(n);
+                return n;
+            }
+            return inner.Read(buffer);
+        }
+
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
     }
 }

@@ -20,6 +20,7 @@ public readonly struct JavaPropertiesReaderState
     internal readonly JavaPropertiesReaderPhase Phase;
     internal readonly byte[]? PendingKey;
     internal readonly int PendingKeyLength;
+    internal readonly JavaPropertiesReaderOptions OptionsCore;
 
     /// <summary>
     /// Initializes a new, default reader state representing the beginning of a document.
@@ -32,6 +33,16 @@ public readonly struct JavaPropertiesReaderState
         Phase = JavaPropertiesReaderPhase.BeforeLine;
         PendingKey = null;
         PendingKeyLength = 0;
+        OptionsCore = default;
+    }
+
+    /// <summary>
+    /// Initializes a new reader state representing the beginning of a document, using the given options.
+    /// The options travel with the state, so every reader resumed from it enforces the same limits.
+    /// </summary>
+    public JavaPropertiesReaderState(JavaPropertiesReaderOptions options) : this()
+    {
+        OptionsCore = options;
     }
 
     internal JavaPropertiesReaderState(
@@ -40,7 +51,8 @@ public readonly struct JavaPropertiesReaderState
         int bytePositionInLine,
         JavaPropertiesReaderPhase phase,
         byte[]? pendingKey,
-        int pendingKeyLength)
+        int pendingKeyLength,
+        JavaPropertiesReaderOptions options)
     {
         BytesConsumedCore = bytesConsumed;
         LineNumberCore = lineNumber;
@@ -48,7 +60,11 @@ public readonly struct JavaPropertiesReaderState
         Phase = phase;
         PendingKey = pendingKey;
         PendingKeyLength = pendingKeyLength;
+        OptionsCore = options;
     }
+
+    /// <summary>The options that readers created from this state enforce.</summary>
+    public JavaPropertiesReaderOptions Options => OptionsCore;
 
     /// <summary>The total number of bytes consumed so far.</summary>
     public long BytesConsumed => BytesConsumedCore;

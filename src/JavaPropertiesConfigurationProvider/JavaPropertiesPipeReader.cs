@@ -12,21 +12,43 @@ public static class JavaPropertiesPipeReader
     /// <summary>Invoked once per property as it becomes available.</summary>
     public delegate void PropertyCallback(ReadOnlySpan<byte> key, ReadOnlySpan<byte> value);
 
-    /// <summary>Reads and processes every property from <paramref name="pipeReader"/> until the pipe completes.</summary>
+    /// <summary>
+    /// Reads and processes every property from <paramref name="pipeReader"/> until the pipe completes, using the
+    /// default <see cref="JavaPropertiesReaderOptions"/> (1 MiB maximum token size).
+    /// </summary>
+    public static Task ProcessPropertiesAsync(
+        PipeReader pipeReader,
+        PropertyCallback callback,
+        CancellationToken cancellationToken = default)
+        => ProcessPropertiesAsync(pipeReader, callback, default, cancellationToken);
+
+    /// <summary>
+    /// Reads and processes every property from <paramref name="pipeReader"/> until the pipe completes, enforcing the
+    /// limits in <paramref name="options"/>.
+    /// </summary>
     public static async Task ProcessPropertiesAsync(
         PipeReader pipeReader,
         PropertyCallback callback,
+        JavaPropertiesReaderOptions options,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(pipeReader);
         ArgumentNullException.ThrowIfNull(callback);
 
-        var state = new JavaPropertiesReaderState();
+        var state = new JavaPropertiesReaderState(options);
 
         while (true)
         {
             ReadResult result = await pipeReader.ReadAsync(cancellationToken).ConfigureAwait(false);
             ReadOnlySequence<byte> buffer = result.Buffer;
+
+            if (result.IsCanceled)
+            {
+                // Leave all unconsumed data in the pipe so the caller can resume if they choose to.
+                pipeReader.AdvanceTo(buffer.Start);
+                throw new OperationCanceledException("The pending read on the PipeReader was canceled.");
+            }
+
             long baselineBeforeAttempt = state.BytesConsumedCore;
             bool isFinalBlock = result.IsCompleted;
 

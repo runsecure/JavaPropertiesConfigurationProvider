@@ -10,10 +10,12 @@ namespace Microsoft.Extensions.Configuration.JavaProperties;
 /// </summary>
 public ref struct JavaPropertiesReader
 {
-    private readonly ReadOnlySpan<byte> _buffer;
+    private ReadOnlySpan<byte> _buffer;
     private readonly bool _isFinalBlock;
 
     private readonly long _consumedBaseline;
+    private readonly JavaPropertiesReaderOptions _options;
+    private readonly int _maxTokenSize;
     private int _index;
     private int _lineNumber;
     private int _bytePositionInLine;
@@ -45,6 +47,8 @@ public ref struct JavaPropertiesReader
         _isFinalBlock = isFinalBlock;
 
         _consumedBaseline = state.BytesConsumedCore;
+        _options = state.OptionsCore;
+        _maxTokenSize = _options.MaxTokenSize;
         _index = 0;
         _lineNumber = state.LineNumberCore;
         _bytePositionInLine = state.BytePositionInLineCore;
@@ -92,12 +96,21 @@ public ref struct JavaPropertiesReader
         return buffer.AsSpan(0, length);
     }
 
-    /// <summary>Releases any pooled memory rented for multi-segment input.</summary>
+    /// <summary>
+    /// Releases any pooled memory rented for multi-segment input. The pooled buffer is cleared before it is
+    /// returned so that property data (which frequently contains secrets) cannot leak to the next renter.
+    /// After disposal the reader no longer references the input: <see cref="ValueSpan"/> is empty and
+    /// <see cref="Read"/> returns <see langword="false"/>. Capture <see cref="CurrentState"/> before disposing
+    /// if it is needed.
+    /// </summary>
     public void Dispose()
     {
         if (_rentedSequenceBuffer is not null)
         {
-            ArrayPool<byte>.Shared.Return(_rentedSequenceBuffer);
+            _buffer = default;
+            _valueSpan = default;
+            _phase = JavaPropertiesReaderPhase.EndOfFile;
+            ArrayPool<byte>.Shared.Return(_rentedSequenceBuffer, clearArray: true);
             _rentedSequenceBuffer = null;
         }
     }
@@ -146,7 +159,7 @@ public ref struct JavaPropertiesReader
                 pendingKeyLength = _keyBufferLength;
             }
 
-            return new JavaPropertiesReaderState(BytesConsumed, _lineNumber, _bytePositionInLine, _phase, pendingKey, pendingKeyLength);
+            return new JavaPropertiesReaderState(BytesConsumed, _lineNumber, _bytePositionInLine, _phase, pendingKey, pendingKeyLength, _options);
         }
     }
 
@@ -238,7 +251,7 @@ public ref struct JavaPropertiesReader
             {
                 if (!_isFinalBlock)
                 {
-                    return false;
+                    return CommitBlankAndNeedMoreData(pos, line, col);
                 }
 
                 _index = pos;
@@ -256,7 +269,7 @@ public ref struct JavaPropertiesReader
             {
                 if (!TryConsumeLineTerminator(buf, ref pos, ref col, ref line))
                 {
-                    return false;
+                    return CommitBlankAndNeedMoreData(pos, line, col);
                 }
                 continue;
             }
@@ -322,7 +335,7 @@ public ref struct JavaPropertiesReader
             {
                 if (!_isFinalBlock)
                 {
-                    return false;
+                    return NeedMoreData(pos, scan, line, scanCol);
                 }
                 break;
             }
@@ -337,6 +350,7 @@ public ref struct JavaPropertiesReader
             scanCol++;
         }
 
+        ThrowIfTokenTooLong(pos, scan, line, scanCol);
         ReadOnlySpan<byte> commentText = buf.Slice(start, scan - start);
         pos = scan;
         col = scanCol;
@@ -367,6 +381,10 @@ public ref struct JavaPropertiesReader
 
         SetKeyBuffer(_valueSpan);
 
+        // The key itself was length-checked by ScanText. Whitespace around the separator is measured on its own
+        // so that an endless run of it cannot make a streaming caller buffer without bound.
+        int separatorStart = pos;
+
         switch (reason)
         {
             case ScanStopReason.LineEnd:
@@ -379,14 +397,14 @@ public ref struct JavaPropertiesReader
                 col++;
                 if (!SkipSeparatorWhitespace(buf, ref pos, ref col))
                 {
-                    return false;
+                    return NeedMoreData(separatorStart, pos, line, col);
                 }
                 break;
 
             case ScanStopReason.Whitespace:
                 if (!SkipSeparatorWhitespace(buf, ref pos, ref col))
                 {
-                    return false;
+                    return NeedMoreData(separatorStart, pos, line, col);
                 }
                 if (pos < buf.Length && (buf[pos] == (byte)'=' || buf[pos] == (byte)':'))
                 {
@@ -394,7 +412,7 @@ public ref struct JavaPropertiesReader
                     col++;
                     if (!SkipSeparatorWhitespace(buf, ref pos, ref col))
                     {
-                        return false;
+                        return NeedMoreData(separatorStart, pos, line, col);
                     }
                 }
                 break;
@@ -467,6 +485,7 @@ public ref struct JavaPropertiesReader
         bool stopAtSeparators,
         out ScanStopReason stopReason)
     {
+        int tokenStart = pos;
         int rawStart = pos;
         bool usedOutput = false;
         _scratchLength = 0;
@@ -478,7 +497,7 @@ public ref struct JavaPropertiesReader
             {
                 if (!_isFinalBlock)
                 {
-                    return false;
+                    return NeedMoreData(tokenStart, pos, line, col);
                 }
                 stopReason = ScanStopReason.EndOfFile;
                 break;
@@ -499,7 +518,7 @@ public ref struct JavaPropertiesReader
                 {
                     if (!_isFinalBlock)
                     {
-                        return false;
+                        return NeedMoreData(tokenStart, pos, line, col);
                     }
                     throw Error("Dangling escape sequence at end of input.", pos, line, col);
                 }
@@ -524,7 +543,7 @@ public ref struct JavaPropertiesReader
                         {
                             if (!_isFinalBlock)
                             {
-                                return false;
+                                return NeedMoreData(tokenStart, p, line, col);
                             }
                             p = afterCr;
                         }
@@ -551,7 +570,7 @@ public ref struct JavaPropertiesReader
                         {
                             if (!_isFinalBlock)
                             {
-                                return false;
+                                return NeedMoreData(tokenStart, p, l2, c2);
                             }
                             break;
                         }
@@ -582,7 +601,7 @@ public ref struct JavaPropertiesReader
 
                     if (!DecodeEscape(buf, ref pos, ref col, line))
                     {
-                        return false;
+                        return NeedMoreData(tokenStart, pos, line, col);
                     }
                     rawStart = pos;
                     continue;
@@ -603,6 +622,7 @@ public ref struct JavaPropertiesReader
             col++;
         }
 
+        ThrowIfTokenTooLong(tokenStart, pos, line, col);
         _valueSpan = usedOutput ? _scratch.AsSpan(0, _scratchLength) : buf.Slice(rawStart, pos - rawStart);
         return true;
     }
@@ -637,35 +657,14 @@ public ref struct JavaPropertiesReader
                     pos += 2; col += 2;
                     return true;
                 }
-                else
-                {
-                    int totalLen = Utf8SequenceTotalLength(e);
-                    if (totalLen == 0)
-                    {
-                        throw Error("Invalid UTF-8 sequence following escape.", pos, line, col);
-                    }
-                    if (pos + 1 + totalLen > buf.Length)
-                    {
-                        if (!_isFinalBlock)
-                        {
-                            return false;
-                        }
-                        throw Error("Truncated UTF-8 sequence following escape.", pos, line, col);
-                    }
-                    AppendScratch(buf.Slice(pos + 1, totalLen));
-                    pos += 1 + totalLen;
-                    col += 1 + totalLen;
-                    return true;
-                }
-        }
-    }
 
-    private static int Utf8SequenceTotalLength(byte leadByte)
-    {
-        if ((leadByte & 0xE0) == 0xC0) return 2;
-        if ((leadByte & 0xF0) == 0xE0) return 3;
-        if ((leadByte & 0xF8) == 0xF0) return 4;
-        return 0;
+                // Java semantics: a backslash before any other character is simply dropped.
+                // Only the backslash is consumed here; the following non-ASCII bytes are handled by
+                // the main scan loop, so a malformed or truncated UTF-8 sequence can never cause
+                // line terminators (and therefore subsequent properties) to be swallowed.
+                pos += 1; col += 1;
+                return true;
+        }
     }
 
     private bool DecodeUnicodeEscape(ReadOnlySpan<byte> buf, ref int pos, ref int col, int line)
@@ -798,13 +797,18 @@ public ref struct JavaPropertiesReader
     private void EnsureScratchCapacity(int additional)
     {
         int required = _scratchLength + additional;
+        if (required > _maxTokenSize)
+        {
+            throw TokenTooLongError(_index, _lineNumber, _bytePositionInLine);
+        }
+
         if (_scratch is null)
         {
-            _scratch = new byte[Math.Max(64, required)];
+            _scratch = new byte[Math.Min(Math.Max(64, required), _maxTokenSize)];
         }
         else if (_scratch.Length < required)
         {
-            int newSize = Math.Max(_scratch.Length * 2, required);
+            int newSize = Math.Max(required, (int)Math.Min((long)_scratch.Length * 2, _maxTokenSize));
             byte[] newBuffer = new byte[newSize];
             _scratch.AsSpan(0, _scratchLength).CopyTo(newBuffer);
             _scratch = newBuffer;
@@ -822,4 +826,39 @@ public ref struct JavaPropertiesReader
     }
 
     private readonly JavaPropertiesException Error(string message, int pos, int line, int col) => new(message, _consumedBaseline + pos, line, col);
+
+    private readonly JavaPropertiesException TokenTooLongError(int pos, int line, int col) => Error(
+        $"A key, value or comment exceeds the maximum allowed size of {_maxTokenSize} bytes. " +
+        $"Increase {nameof(JavaPropertiesReaderOptions)}.{nameof(JavaPropertiesReaderOptions.MaxTokenSize)} if this input is trusted.",
+        pos, line, col);
+
+    private readonly void ThrowIfTokenTooLong(int tokenStart, int pos, int line, int col)
+    {
+        if (pos - tokenStart > _maxTokenSize)
+        {
+            throw TokenTooLongError(pos, line, col);
+        }
+    }
+
+    /// <summary>
+    /// Called whenever the current token is incomplete and more input is needed. Enforcing the limit here
+    /// (rather than only once a token completes) bounds how much data streaming callers must buffer.
+    /// </summary>
+    private readonly bool NeedMoreData(int tokenStart, int pos, int line, int col)
+    {
+        ThrowIfTokenTooLong(tokenStart, pos, line, col);
+        return false;
+    }
+
+    /// <summary>
+    /// Blank lines and leading whitespace carry no data, so they are committed as consumed before asking for
+    /// more input. Otherwise an arbitrarily long run of them would have to be retained by the caller.
+    /// </summary>
+    private bool CommitBlankAndNeedMoreData(int pos, int line, int col)
+    {
+        _index = pos;
+        _lineNumber = line;
+        _bytePositionInLine = col;
+        return false;
+    }
 }

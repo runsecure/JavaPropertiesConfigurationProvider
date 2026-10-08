@@ -33,7 +33,7 @@ public sealed class JavaPropertiesConfigurationProvider : FileConfigurationProvi
 
             // Duplicate keys: last value wins.
             data[key] = value;
-        });
+        }, options: TypedSource.ReaderOptions);
 
         Data = data;
     }

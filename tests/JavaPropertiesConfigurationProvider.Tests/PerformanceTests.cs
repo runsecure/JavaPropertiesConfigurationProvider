@@ -55,7 +55,9 @@ public class PerformanceTests
     {
         string longValue = new string('a', 5_000_000);
         byte[] data = Encoding.UTF8.GetBytes($"key={longValue}\n");
-        var reader = new JavaPropertiesReader(data, isFinalBlock: true);
+        // Values above the 1 MiB default require an explicit opt-in.
+        var options = new JavaPropertiesReaderOptions { MaxTokenSize = 8_000_000 };
+        var reader = new JavaPropertiesReader(data, isFinalBlock: true, new JavaPropertiesReaderState(options));
         Assert.True(reader.ReadProperty());
         Assert.Equal(longValue, reader.GetString());
     }

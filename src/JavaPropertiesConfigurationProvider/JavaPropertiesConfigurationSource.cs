@@ -14,6 +14,23 @@ public sealed class JavaPropertiesConfigurationSource : FileConfigurationSource
     /// </summary>
     public bool ReplacePeriodsWithKeyDelimiter { get; set; } = true;
 
+    /// <summary>
+    /// The maximum size, in bytes, of a single key, value or comment in the file. Files containing a larger
+    /// entry fail to load with a <see cref="JavaPropertiesException"/>. Defaults to
+    /// <see cref="JavaPropertiesReaderOptions.DefaultMaxTokenSize"/> (1 MiB), which protects against
+    /// memory exhaustion from corrupted or malicious files. Raise it only if your files need larger values.
+    /// </summary>
+    /// <exception cref="ArgumentOutOfRangeException">The value is zero or negative.</exception>
+    public int MaxTokenSize
+    {
+        get => _readerOptions.MaxTokenSize;
+        set => _readerOptions.MaxTokenSize = value;
+    }
+
+    private JavaPropertiesReaderOptions _readerOptions;
+
+    internal JavaPropertiesReaderOptions ReaderOptions => _readerOptions;
+
     /// <inheritdoc />
     public override IConfigurationProvider Build(IConfigurationBuilder builder)
     {
