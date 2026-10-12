@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/benchmarks/">
+    <Project Path="benchmarks/JavaPropertiesConfigurationProvider.Benchmarks/JavaPropertiesConfigurationProvider.Benchmarks.csproj" />
+  </Folder>
+  <Folder Name="/samples/">
+    <Project Path="samples/AotSmokeTest/AotSmokeTest.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/JavaPropertiesConfigurationProvider/JavaPropertiesConfigurationProvider.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/JavaPropertiesConfigurationProvider.Tests/JavaPropertiesConfigurationProvider.Tests.csproj" />
+  </Folder>
+</Solution>
